@@ -1,0 +1,197 @@
+; selfext.ng -- self-extracting wrapper for the packed binary.
+;
+; DOS drops a .COM at 100h. The image is assembled to live at IMGORG, past
+; the end of the loaded file, so the depacker decompresses IN PLACE: forward
+; from IMGORG, the writer never catching the reader.
+
+bits 16
+cpu 8086
+org 100h
+
+ifndef PAYLOAD
+  error "assemble with -DPAYLOAD='\"file.pk\"'"
+endif
+
+ifndef IMGORG
+  IMGORG  equ 1100h            ; past the loaded 4096-byte file.
+endif
+
+        mov si,payload
+        mov di,IMGORG
+ifdef ENTRY
+        mov ax,ENTRY           ; the image's start label, --export'ed. The 8086
+        push ax                ; has no PUSH imm.
+else
+        push di                ; the depacker's final RET returns into the
+                               ; unpacked image at its first byte.
+endif
+
+define UPOFF 0                 ; assembled where it runs: no patch offset.
+
+; Adaptive-arithmetic depacker: the 16-bit range coder namagiri encodes for.
+; On entry SI = packed stream, DI = the destination, and the resume address
+; already pushed -- the RET the end marker reaches consumes it. Scratch RAM
+; at PROBS is ours: the depacker finishes before the image runs.
+;
+; The copy loop patches its own LEA displacement with minus the match offset;
+; a CALL always follows before the LEA runs, so the 8086 prefetch queue never
+; sees the stale displacement.
+;
+; Each selector word sits two below the Elias block its 0-branch leads to, so
+; after "repeat the last offset" BX is already the match-length block and
+; after "literals" the run-length block. The two byte trees sit on 512-byte
+; boundaries, so CX = base/2*256+index doubles into the slot address.
+;
+; The interval lives in BP (range) and [cod]; probabilities are words, all
+; starting at even odds. Normalisation happens on ENTRY to decbit so the
+; carry it returns survives to the caller.
+
+PROBS   equ 3000h              ; above the unpacked image.
+LIT     equ 3000h              ; 256 words: the literal bit tree.
+OFF     equ 3200h              ; 256 words: the offset low byte.
+SEL0    equ 3400h              ; after-literals selector = EL1's entry word.
+EL1     equ 3402h              ; 32 words each, interleaved stop,data:
+SEL1    equ 3442h              ; after-match selector = EL0's entry word.
+EL0     equ 3444h              ; run length, match length, offset high.
+EL2     equ 3484h
+NPROB   equ 610
+res     equ PROBS+2*NPROB+1    ; the bit reservoir, sentinel below the data.
+cod     equ res+1              ; the code word.
+
+        push di                ; the destination, while DI seeds the model:
+        mov di,PROBS           ; every context at even odds, and the state
+        mov cx,NPROB+1         ; below follows contiguously.
+        mov ax,8000h
+        rep stosw              ; one word past the model gives res its 80h
+                               ; sentinel for free.
+        movsw                  ; the first sixteen code bits, emitted
+                               ; pre-swapped, straight into cod.
+        mov bp,0ffffh          ; the whole interval.
+        pop di
+        mov bx,EL0-2           ; the stream opens in literals.
+
+lit:    call elias             ; the literal run.
+ll:     call dbyte_lit
+        stosb
+        loop ll
+        mov bx,SEL0            ; full width: the byte tree left BH behind.
+        call decbit            ; After literals: 1 -> new offset, and on 0
+        jc new                 ; BX already holds the match-length block,
+        call elias             ; so the repeat path is just the length,
+copy:   push si                ; falling straight into the copy.
+        db 8dh,0b5h            ; LEA SI,[DI+disp16], raw so the initial -1
+ardisp: dw -1                  ; keeps its word displacement.
+        rep movsb              ; forward, so an overlap repeats as LZ intends.
+        pop si
+        mov bl,SEL1&0ffh       ; BH is 34h on every path here. After a match:
+        call decbit            ; 0 -> literals, with BX already the
+        jnc lit                ; run-length block; 1 falls into the new offset.
+new:    mov bl,(EL2-2)&0ffh    ; ((offset-1)>>8)+1; BH again 34h.
+        call elias
+        mov ch,cl              ; one MOV both tests and builds: of 1..256
+ifdef E8FIX
+        jcxz e8fix             ; only the end marker, 256, is 0100h, and
+else
+        jcxz aret              ; only the end marker, 256, is 0100h, and
+endif
+        dec ch                 ; copying CL over it makes it 0000, while a
+        call dbyte_off         ; real q becomes (q-1):q, the low byte to come
+                               ; from the offset tree.
+        mov cl,al
+        not cx                 ; CX = offset-1, so ~CX = -offset exactly,
+        mov [ardisp+UPOFF],cx  ; patched where the copy will read it.
+        mov bx,EL1-2
+        call elias
+        inc cx                 ; a new-offset match is at least two bytes.
+        jmp short copy
+
+; An interlaced Elias value into CX; BX = the kind's context block minus two,
+; so a selector word doubles as the entry.
+elias:  mov cx,1
+el:     call decnext           ; the stop bit for this position.
+        jc cret
+        call decnext           ; its data slot is the next word.
+        adc cx,cx              ; the carry is the bit.
+        jmp short el
+
+; A byte through a boundary-aligned tree: CH = base>>9 rides above the
+; walking index in CL, whose marker bit falls out after exactly eight.
+dbyte_lit:
+        push cx
+        mov ch,LIT>>9
+        jmp short dbst
+dbyte_off:
+        push cx
+        mov ch,OFF>>9
+dbst:   mov cl,1
+dbit:   mov bx,cx
+        add bx,bx              ; 2*(base/2 + index) is the slot outright.
+        call decbit
+        rcl cl,1
+        jnc dbit
+        xchg ax,cx             ; the byte into AL; AH takes the tree page,
+        pop cx                 ; which no caller reads.
+aret:
+        ret                    ; ...and the end marker's exit.
+ifdef E8FIX
+; Undo the packer's E8 transform, on the end marker's path alone. Every
+; `call rel16' was stored as its target's FILE OFFSET; DI is the end of the
+; unpacked image, left there by the copy loop.
+e8fix:  mov si,IMGORG
+e8:     lodsb
+        cmp al,0e8h
+        jne e8n
+        sub [si],si            ; the arithmetic lands ON the operand.
+        add word [si],IMGORG-2
+        lodsw                  ; one byte of SI += 2.
+e8n:    cmp si,di
+        jb e8
+        ret
+endif
+
+; One bit against the context word at [BX], returned in the carry.
+decnext:
+        inc bx
+        inc bx
+decbit: or bp,bp               ; renormalise: the interval must keep its top
+        js go                  ; bit, which is what makes one MUL exact.
+        shl bp,1
+        shl byte [res],1       ; the reservoir carries a sentinel below the
+        jnz nb                 ; data, so it hits zero exactly when spent.
+        lodsb
+        adc al,al              ; ...and the carry out becomes the next sentinel.
+        mov [res],al
+nb:     rcl word [cod],1
+        jmp short decbit
+go:     push cx                ; CX is the caller's Elias value or run length.
+        mov cl,5
+        mov ax,[bx]
+        mul bp                 ; DX = (p * range) >> 16, the split point.
+        mov ax,[bx]
+        shr ax,cl              ; the update step: SUB takes it as p>>5, ADD
+        cmp [cod],dx           ; as its 11-bit complement, and
+        jb zero                ; (~p)>>5 == (p>>5) XOR 7FFh.
+        sub [cod],dx           ; upper interval: the bit is 1.
+        sub bp,dx
+        sub [bx],ax            ; p -= p>>5.
+        pop cx
+        stc
+        ret
+zero:   mov bp,dx              ; lower interval: the bit is 0.
+        xor ax,7ffh
+        add [bx],ax            ; p += (~p)>>5, which cannot carry,
+        pop cx
+cret:   ret                    ; so the carry is already clear.
+
+payload:
+        incbin PAYLOAD
+if ($-$$)+100h > IMGORG
+  error "payload overlaps the unpack destination -- raise IMGORG"
+endif                          ; in-place unpacking is only safe while the
+                               ; whole loaded file sits below IMGORG.
+
+ifndef NOPAD
+  if ($-$$) <= 4096
+times 4096-($-$$) db 0         ; at or under budget: pad to exactly 4096.
+  endif                        ; over budget: build anyway, and free goes
+endif                          ; negative.

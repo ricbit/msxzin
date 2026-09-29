@@ -1,0 +1,749 @@
+; DEBUG HOOKS AND THEIR KNOBS, included by msx.ng.
+;
+; THIS IS MACHINE GENERATED - no human eyes ever looked here, beware.
+;
+; Zé Pequeno's line from the gb tree, and it is the one drawn here: a knob
+; that selects WHICH EMULATOR IS BUILT stays in msx.ng -- ZEX, SHOT, PACK,
+; NOVID, IMGORG, NOTHROTTLE -- and a knob that changes what the emulator
+; REPORTS ABOUT ITSELF lives here. The first kind is a variant, the second is
+; a hook, and a %ifdef block sitting inline made the two look alike in a file
+; that is read far more often than it is assembled.
+;
+; Every hook assembles to NOTHING unless its own -D is given, exactly as it
+; did when it was written out in place: the macro is where it lives, not what
+; it does. `debug <name>' at the call site is sugar -- the assembler strips
+; the word and expands <name> -- and it exists so a reader can see at a glance
+; that a line is a hook. A misspelt name is still an error, because an unknown
+; macro reaches the encoder and is refused there.
+;
+; NOT here: the STOPPATH chain. It has to run AFTER -DZEX has implied -DCPM,
+; so it sits where it always did, next to the .stop scaffolding it guards.
+; That ordering is exactly what an include moves, and build.sh assembles all
+; nineteen knobs on every run to catch it if it ever does.
+
+; Debug knobs, usable in any build
+ifdef TRACE
+  define LIMIT TRACE
+  define DOTRACE 1
+  define NEEDHEX 1
+endif
+ifdef TRACEWIN
+  define DOTRACE 1
+  define NEEDHEX 1
+endif
+ifdef DUMPAT
+  define NEEDHEX 1
+  ifndef DUMPLEN               ; -DDUMPLEN=n widens the dump; 16 as before
+    define DUMPLEN 16
+  endif
+endif
+ifdef DUMPREG
+  define NEEDHEX 1
+endif
+ifdef DUMPPC
+  define NEEDHEX 1
+endif
+ifdef TRAPCART
+  define NEEDHEX 1
+endif
+ifdef TRAPLOW
+  define NEEDHEX 1
+endif
+ifdef TRAPVW
+  define NEEDHEX 1
+endif
+ifdef TRAPPC
+  define NEEDHEX 1
+endif
+ifdef LOGDSK
+  define NEEDHEX 1
+endif
+ifdef LOGVDP
+  define NEEDHEX 1
+endif
+
+; -DLOGVDP: every VDP register write, as reg=value, so a register that ends up
+; holding a byte nobody meant to write can be traced to the OUT that wrote it.
+macro log_vdp_write()
+  ifdef LOGVDP
+        ; -DLOGVDP: every register write, as reg=value, so a register that
+        ; ends up holding a byte nobody meant to write can be traced to the
+        ; OUT that wrote it.
+        push ax
+        push bx
+        push dx
+        mov bl,al
+        mov al,[vlow]
+        call ptrace_hex8
+        mov al,bl
+        and al,7
+        call ptrace_hex8
+        mov dl,10
+        call ptrace_put
+        pop dx
+        pop bx
+        pop ax
+  endif
+end macro
+
+; -DSNDLOG: append every rendered half to SND.RAW.
+macro snd_log_write()
+  ifdef SNDLOG
+        ; -DSNDLOG appends every half to SND.RAW as it is rendered, so a
+        ; capture is continuous rather than the single buffer SHOT dumps.
+        ; Run these WITHOUT -DNOTHROTTLE: the refill rate is set by the real
+        ; DMA counter, so an unthrottled guest advances its music many frames
+        ; per half and the log comes out time-compressed.
+        mov bx,[sndh]          ; read the handle before DS leaves our segment
+        mov dx,[sndpos]
+        push ds
+        push es
+        pop ds                 ; DS:DX = the half just rendered
+        mov cx,SBLEN           ; a half is SBLEN bytes, not SBLEN samples
+        mov ah,40h
+        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        pop ds
+  endif
+end macro
+
+; -DSNDLOG: remember where this half starts, for the write below.
+macro snd_log_mark()
+  ifdef SNDLOG
+        mov [sndpos],di        ; where this half starts, for the log below
+  endif
+end macro
+
+; -DTRAPVW=addr: stop on a write to a watched VRAM address.
+macro trap_vram_write()
+  ifdef TRAPVW
+        cmp al,0c3h            ; ROM[1]: the giveaway that the source is 0000
+        jne @portout_vd2
+        cmp word [vaddr],1
+        jne @portout_vd2
+        mov ah,[zH]            ; the block-move source pointer
+        mov al,[zL]
+        call ptrace_w
+        mov ax,si
+        call ptrace_w
+        mov bx,[zSP]           ; and the caller, three frames up
+        mov cx,3
+@portout_rt:
+        mov ax,[es:bx]
+        add bx,2
+        push cx
+        call ptrace_w
+        pop cx
+        loop @portout_rt
+        jmp quit
+@portout_vd2:
+  else
+  endif
+end macro
+
+; -DLOGDSK: one line per disk-ROM call -- entry, DE, BC, HL, F.
+macro log_disk_call()
+  ifdef LOGDSK
+        ; -DLOGDSK: one line per disk-ROM call -- entry, DE, BC, HL, F. The
+        ; entries are what the guest asks for; the emulator's answer is the
+        ; only thing a real drive would have disagreed with.
+        push ax
+        push bx
+        push dx
+        push si
+        mov ax,si
+        call ptrace_w
+        mov ax,[zE]
+        call ptrace_w
+        mov ax,[zC]
+        call ptrace_w
+        mov ax,[zL]
+        call ptrace_w
+        mov al,[zF]
+        call ptrace_hex8
+        mov al,[zA]
+        call ptrace_hex8
+        mov dl,10
+        call ptrace_put
+        pop si
+        pop dx
+        pop bx
+        pop ax
+  endif
+end macro
+
+; -DTRAPLOW: stop the moment control leaves the program image.
+macro trap_low_check()
+  ifdef TRAPLOW
+        ; -DTRAPLOW: stop the moment control leaves the program image, so the
+        ; dump shows the wild PC and lastpc shows who jumped there.
+        cmp bx,100h
+        jb run_stop
+        mov [lastpc],bx
+  endif
+end macro
+
+; -DCPM: CP/M and the ZEX harness enter at the image default.
+macro cpm_seed_pc()
+  ifdef CPM
+        mov si,[zPC]           ; CP/M and the ZEX harness enter at the image
+                               ; default; the MSX boot seeds SI directly and
+                               ; has no storage to load
+  endif
+end macro
+
+; -DPRESS: the frame counter that hook decrements.
+macro press_space_count()
+  ifdef PRESS                  ; PRESS's own word, and OUTSIDE the -DSHOT
+pressn:                        ; guard below: the frame loop decrements it
+        dw PRESS               ; under `%ifdef PRESS' alone, so declaring it
+  endif                        ; only in the screenshot build made -DPRESS on
+end macro
+
+; -DPRESS=n: from frame n on, tap SPACE every 20 frames.
+macro press_space_tick()
+  ifdef PRESS
+        ; -DPRESS=n: from frame n on, tap SPACE every 20 frames -- the only
+        ; way a headless run gets past a title screen and into gameplay,
+        ; where the artifact hunting is. Debug only, like SHOT.
+        dec word [pressn]
+        jnz @frame_npr
+        mov word [pressn],20
+        xor byte [kmatrix+8],1 ; SPACE is row 8 bit 0, active low
+@frame_npr:
+  endif
+end macro
+
+; -DDUMPAT=addr: eight guest words from addr, hex, to stdout at exit.
+macro dump_mem_at_quit()
+  ifdef DUMPAT
+        mov si,DUMPAT          ; eight guest words from DUMPAT, hex, to stdout
+        mov cx,8
+@quit_dl:
+        push cx
+        mov ax,[es:si]
+        add si,2
+        call ptrace_w
+        pop cx
+        loop @quit_dl
+  endif
+end macro
+
+; -DSNDLOG: create SND.RAW before the first half is filled.
+macro snd_log_open()
+  ifdef SNDLOG
+        push ds                ; open the log before the first half is filled
+        push cs
+        pop ds
+        mov dx,fsnd
+        xor cx,cx
+        mov ah,3ch
+        int 21h uses(ax,cx,dx) ; create: CX attributes, DS:DX name
+        pop ds
+        mov [sndh],ax          ; DOS closes it for us at exit
+  endif
+end macro
+
+; -DSNDLOG: the log's filename, in an unconditional section on purpose -- see the block.
+macro snd_log_filename()
+  ifdef SNDLOG
+fsnd:
+        db "SND.RAW",0         ; signed 16-bit mono at SBRATE, no header.
+                               ; INSIDE an unconditional section on purpose:
+                               ; `section fsnd' under its own %ifdef existed in
+                               ; the source text and not in the build, so
+                               ; namagiri counted 167 sections and ngapply,
+                               ; which reads the text, counted 168 -- and every
+                               ; genome had to have the phantom spliced back
+                               ; into its order by hand before it would apply
+  endif
+end macro
+
+; -DTRAPPC: the skip counter, so a PC hit can be ignored N times.
+macro trap_pc_vars()
+  ifdef TRAPPC
+    ifndef TRAPSKIP
+      define TRAPSKIP 1
+    endif
+tskip:
+        dw TRAPSKIP
+  endif
+end macro
+
+; -DSHOT and -DCPM both need [zPC] kept: the frame dumper reads the PC from
+; it, and the CP/M harness enters from it.
+macro keeps_zpc()
+  ifdef SHOT
+    define KEEPZPC 1
+  endif
+  ifdef CPM
+    define KEEPZPC 1
+  endif
+  ifdef KEEPZPC
+zPC:
+        dw 100h
+  endif
+end macro
+
+; NEEDHEX: the hex printer every dumping hook shares.
+macro hex_printer()
+  ifdef NEEDHEX
+ptrace:
+        mov ax,si
+ptrace_w:
+        push ax
+        mov al,ah
+        call ptrace_hex8
+        pop ax
+        call ptrace_hex8
+        mov dl,' '
+        jmp ptrace_put
+ptrace_hex8:
+        push ax
+        shr al,4               ; single shifts: the dump loops count in CX
+        call @ptrace_nyb
+        pop ax
+        and al,0fh
+@ptrace_nyb:
+        add al,'0'
+        cmp al,'9'
+        jbe @ptrace_p
+        add al,7
+@ptrace_p:
+        mov dl,al
+ptrace_put:
+        mov ah,2
+        int 21h uses(ax,dx)    ; display character: DL
+        ret
+  endif
+end macro
+
+; -DTRAPLOW: the last-PC word the dump reports.
+macro trap_low_vars()
+  ifdef TRAPLOW
+lastpc:
+        dw 0
+  endif
+end macro
+
+; -DLIMIT: the countdown word. -DTRACE spells its initial value, see the block.
+macro limit_vars()
+  ifdef LIMIT
+tleft:
+    ifdef TRACE
+        dd TRACE               ; not `dd LIMIT`: %define LIMIT TRACE substitutes
+    else                       ; once and the result is never rescanned, so that
+        dd LIMIT               ; spelling reached the assembler as a SYMBOL named
+    endif                      ; TRACE and -DTRACE=N could not build at all
+  endif
+end macro
+
+; The .stop scaffolding itself: the dumps every trap lands in. Carries -DDUMPAT, -DTRAPLOW, -DDUMPPC and -DDUMPREG inside it.
+macro stop_path()
+  ifdef STOPPATH
+    ifndef CPM
+        jmp run_go             ; jump over .stop, which only the traps reach
+    endif
+run_stop:
+    ifdef DUMPAT
+        ; -DDUMPAT=addr: print 16 guest bytes from addr before stopping.
+        mov bx,DUMPAT          ; BX, not SI: SI holds the guest PC and the
+        mov cx,DUMPLEN         ; DUMPPC block below wants to print it
+@run_dl:
+        mov al,[es:bx]
+        call ptrace_hex8
+        inc bx
+        loop @run_dl
+    endif
+    ifdef TRAPLOW
+        call ptrace            ; the wild PC
+        mov ax,[lastpc]
+        push ax
+        mov al,ah
+        call ptrace_hex8
+        pop ax
+        call ptrace_hex8
+        mov dl,' '
+        call ptrace_put
+    endif
+    ifdef DUMPPC
+        ; -DDUMPPC: print the guest PC (and SP) at the stop.
+        mov ax,si
+        call ptrace_w
+        mov ax,[zSP]
+        call ptrace_w
+    endif
+    ifdef DUMPREG
+        ; -DDUMPREG: print A F B C D E H L before stopping.
+        mov si,zC              ; storage order: C B E D L H A F
+        mov cx,8
+@run_rl:
+        mov al,[si]
+        call ptrace_hex8
+        inc si
+        loop @run_rl
+    endif
+        ret
+  endif                        ; STOPPATH: in a release build nothing above
+end macro
+
+; -DCPM: guest traps -- 0000h warm boot (end of run), 0005h BDOS then RET.
+macro cpm_traps()
+  ifdef CPM
+        ; guest traps: 0000h = warm boot (end of run), 0005h = BDOS then RET
+        or bx,bx
+        jz run_stop
+        cmp bx,5
+        jne run_go
+        call bdos
+        call popz
+        xchg ax,si
+        jmp mega
+  endif
+end macro
+
+; -DTRAPCART: stop on the first fetch out of cartridge space.
+macro trap_cart_check()
+  ifdef TRAPCART
+        cmp bx,4000h           ; -DTRAPCART: stop the moment the guest enters
+        jb @run_nc             ; the cartridge, to prove the BIOS handed over
+        cmp bx,0c000h
+        jae @run_nc
+        jmp run_stop
+@run_nc:
+  endif
+end macro
+
+; -DTRAPPC=addr: dump HL and stop when the guest PC reaches addr.
+macro trap_pc_check()
+  ifdef TRAPPC
+        cmp bx,TRAPPC          ; -DTRAPPC=addr: dump HL and DE on arrival
+        jne @run_ntp
+        dec word [tskip]       ; -DTRAPSKIP=n ignores the first n arrivals
+        jnz @run_ntp
+        mov ax,[zL]
+        call ptrace_w
+        mov ax,[zE]
+        call ptrace_w
+        jmp run_stop
+@run_ntp:
+  endif
+end macro
+
+; The stop path: only the trap compares and CP/M read BX here.
+macro stop_bx_for_traps()
+  ifdef STOPPATH
+        mov bx,si              ; only the trap compares and CP/M read BX here
+  endif
+end macro
+
+; -DLIMIT=N: stop after N guest instructions so DOS flushes redirected output. Carries -DTRACE and -DTRACEWIN inside it.
+macro limit_tick()
+  ifdef LIMIT
+        ; -DLIMIT=N stops after N guest instructions so DOS flushes redirected
+        ; output; -DTRACE=N also prints each PC. Debug only — the release build
+        ; assembles neither.
+        cmp word [tleft],0
+        jne @run_tick
+        cmp word [tleft+2],0
+        je run_stop
+        dec word [tleft+2]
+@run_tick:
+        dec word [tleft]
+    ifdef DOTRACE
+        ; -DTRACEWIN=N narrows the trace to the LAST N instructions before the
+        ; stop, which is the only usable form once the interesting moment is
+        ; millions in: a full trace to 5M is 26M DOS character writes.
+        ; tleft counts DOWN to the stop, so "the tail" is simply a small tleft.
+      ifdef TRACEWIN
+        cmp word [tleft+2],0
+        jne @run_notr
+        cmp word [tleft],TRACEWIN
+        ja @run_notr
+      endif
+        call ptrace
+      ifdef TRACEWIN
+@run_notr:
+      endif
+    endif
+  endif
+end macro
+
+; -DSNDLOG: the log's two BSS words, above ntbase's five.
+macro snd_log_vars()
+  ifdef SNDLOG
+sndh:                          ; debug only, and placed in the slack ABOVE the
+        resw 1 at BSSLO+30ah   ; shipped variables: an entry with no address
+sndpos:                        ; follows wherever the cursor sits, and with
+        resw 1 at BSSLO+30ch   ; addresses chosen per entry that is no longer
+  endif                        ; the end of the block. Naming them keeps a
+end macro
+
+; -DZEX: the ZEXDOC harness -- its own `start', the CP/M BDOS calls the guest
+; makes, and the filename it loads. It replaces the MSX boot rather than
+; instrumenting it, which by the variants/hooks rule reads like a variant; it
+; is here because what it builds is a TEST, not an emulator anyone runs, and
+; because sixty-six lines of CP/M in the middle of the MSX boot is the exact
+; confusion this file was moving hooks out to end (Ricardo's call).
+;
+; The %defines travel with it and still take effect where the block sat: CPM
+; is set here and the STOPPATH chain reads it further down, which is why that
+; chain says it sits "after -DZEX has implied -DCPM".
+macro zex_harness()
+  ifdef ZEX
+    define CPM 1
+    ifndef ZGUEST
+      define ZGUEST 'zexdoc.com'
+    endif
+  endif                        ; the ZEX definitions; its code is zex_boot/zex_quit
+end macro
+
+; The ZEX entry: the ZEX arm of `section boot', which names it. It ends by
+; jumping to `quit' where the old single block fell into it.
+macro zex_boot()
+  ifdef ZEX
+        push cs
+        pop ds
+        mov di,{BSSLO:BSSLO↔bssmin}
+                               ; the variables past the image start as garbage
+        mov cx,{(bssmax-BSSLO+1)/2:(bssmax-BSSLO+1)/2↔(BSSHI-bssmin)/2}
+                               ; (ES is still the PSP here, which is CS).
+                               ; bssmin/bssmax are the assembler's own answer
+                               ; for where the variables actually start and
+                               ; end: with addresses chosen per entry, that
+                               ; span is a RESULT of the layout, not a
+                               ; constant anyone can write down (Ricardo's)
+        xor ax,ax
+        rep stosw
+        mov ax,cs              ; the guest goes where the MSX puts it, and
+        add ax,GUEST           ; zPC keeps its image default of 100h -- only
+        mov es,ax              ; the MSX boot zeroes it
+        dec byte [curslot]     ; 0 -> FFh: every page slot 3. wrb refuses
+                               ; writes to a slot-0 page, and a zeroed
+                               ; curslot is four of them -- CP/M is RAM
+        mov dx,fzex
+        mov bx,100h
+        mov cx,0ff00h
+        call loadfile
+        jc quit
+        mov word [es:6],0c900h ; the BDOS address word: ZEXDOC also loads
+                               ; it into SP, clear of the image
+        debug cpm_seed_pc
+        call mega              ; returns on the guest's warm boot
+        jmp quit
+  endif
+end macro
+
+; The ZEX exit, then the guest file name and the BDOS console calls: the ZEX
+; arm of `section quit', which names it. Nothing falls past the exit().
+macro zex_quit()
+  ifdef ZEX
+        mov ax,4c00h
+        int 21h uses(ax) exit() ; terminate: AL is the exit code, and
+                               ; exit() says nothing returns from it
+fzex:
+        db ZGUEST,0
+
+; CP/M BDOS: C=2 write char in E, C=9 write $-terminated string at DE.
+bdos:
+        mov al,[zC]
+        cmp al,9
+        je @bdos_str
+        cmp al,2
+        jne @bdos_done
+        mov dl,[zE]
+@bdos_putc:
+        mov ah,2
+        int 21h uses(ax,dx)    ; display character: DL
+@bdos_done:
+        ret
+@bdos_str:
+        mov bx,[zE]            ; one load: D sits right above E in storage
+@bdos_sl:
+        mov dl,[es:bx]
+        cmp dl,'$'
+        je @bdos_done
+        inc bx
+        push bx
+        call @bdos_putc
+        pop bx
+        jmp @bdos_sl
+  endif
+end macro
+
+; -DSLOT2TEST: after the reset mapping, map slot 2 (the disk ROM) into page 1,
+; to watch what a guest sees there.
+macro slot2_test()
+  ifdef SLOT2TEST
+        mov al,00001000b       ; DEBUG: after reset, page 1 <- slot 2.
+        call setslot
+  endif
+end macro
+
+; -DSHOT=n: the screenshot harness's own half -- the frame counters, the
+; routine that writes the 64000-byte VGA framebuffer to SHOT.RAW, and the four
+; filenames it and the register/VRAM dumps use. The -DSHOT knob itself stays a
+; VARIANT in msx.ng, because gate.py builds with it on every leg and what it
+; selects is a different emulator; what moved here is the dumper, which is
+; instrumentation by any reading.
+; -DSHOT: a histogram of OUT ports, one word per port, which shot_dumper
+; writes out beside the frame. It sits just past amptab, which is read-only; the
+; tick is the first thing `section ports' does.
+macro port_hist_vars()
+  ifdef SHOT
+portcnt:
+        times 256 dw 0         ; one word per OUT port, for either back-end.
+  endif
+end macro
+
+macro port_hist_count()
+  ifdef SHOT
+        push bx                ; SHOT-only: histogram of OUT ports.
+        mov bl,dl
+        xor bh,bh
+        shl bx,1
+        inc word [portcnt+bx]
+        pop bx
+  endif
+end macro
+
+; -DSHOT: frame keeps the PC in [zPC] for dumpfb.
+macro shot_save_pc()
+  ifdef SHOT
+        mov [zPC],si           ; dumpfb reads the PC from storage; debug only.
+  endif
+end macro
+
+; -DSHOT: count frames down to the dump, then keep re-arming until a PSG
+; channel sounds -- or shotw runs out -- and dump the frame and quit.
+macro shot_countdown()
+  ifdef SHOT
+        dec word [shotn]       ; -DSHOT=n: dump after n frames -- and, so the
+        jnz @frame_go          ; sound dump catches a note rather than a gap
+        mov word [shotn],1     ; between them, keep re-arming until a channel
+        dec word [shotw]       ; is sounding -- but never forever: a game that
+        jz @frame_dump         ; keeps its volumes masked (Goonies plays via
+        mov al,[psgregs+8]     ; the envelope bit, which reads as 0 through
+        or al,[psgregs+9]      ; the 0fh mask) would otherwise re-arm for
+        or al,[psgregs+10]     ; eternity and the harness would look wedged.
+        and al,0fh             ; This sits after sndupd so the mixer has
+        jz @frame_go           ; already run with that note.
+@frame_dump:
+        call dumpfb
+        jmp quit
+@frame_go:
+  endif
+end macro
+
+macro shot_dumper()
+  ifdef SHOT
+shotn:
+        dw SHOT & 0ffffh       ; the AND is not decoration: a debug run asks for
+                               ; -DSHOT=100000 to mean "never", and wrapping is
+                               ; exactly what is wanted. Said out loud because
+                               ; an out-of-range dw is an error here now, and
+                               ; this is the one place the truncation is meant
+shotw:
+        dw 300                 ; frames to wait for a sounding channel
+; write the 64000-byte VGA framebuffer to SHOT.RAW for offline inspection
+dumpfb:
+        push cs
+        pop ds
+        mov dx,fshot
+        mov cx,0
+        mov ah,3ch
+        int 21h uses(ax,cx,dx) ; create: CX attributes, DS:DX name
+        jc @dumpfb_x
+        mov bx,ax
+        push ds
+        mov ax,0a000h
+        mov ds,ax
+        xor dx,dx
+        mov cx,0fa00h
+        mov ah,40h
+        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        pop ds
+        mov ah,3eh
+        int 21h uses(ax,bx)    ; close: BX the handle
+@dumpfb_x:
+        ; also dump VRAM and the VDP registers, so a blank screen can be
+        ; diagnosed offline: is the guest not drawing, or are we not reading?
+        mov dx,fvram
+        mov cx,0
+        mov ah,3ch
+        int 21h uses(ax,cx,dx) ; create: CX attributes, DS:DX name
+        jc @dumpfb_y
+        mov bx,ax
+        push ds
+        mov ds,[cs:vseg]
+        xor dx,dx
+        mov cx,4000h
+        mov ah,40h
+        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        pop ds
+        mov ah,3eh
+        int 21h uses(ax,bx)    ; close: BX the handle
+@dumpfb_y:
+        mov dx,freg
+        mov cx,0
+        mov ah,3ch
+        int 21h uses(ax,cx,dx) ; create: CX attributes, DS:DX name
+        jc @dumpfb_z
+        mov bx,ax
+        mov dx,vregs
+        mov cx,8
+        mov ah,40h
+        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        mov dx,zPC
+        mov cx,2
+        mov ah,40h
+        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        mov dx,psgregs         ; the latched PSG state, to check the sound path
+        mov cx,16
+        mov ah,40h
+        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        mov dx,zF              ; and the guest register file, both banks
+        mov cx,16
+        mov ah,40h
+        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        mov dx,phase           ; the synthesis state: phase, inc, amp, noise
+        mov cx,24
+        mov ah,40h
+        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        mov dx,sccreg          ; the captured SCC window and its armed flag --
+        mov cx,0a1h            ; this must precede the SB.BIN block, which
+        mov ah,40h             ; reuses and closes the handle in BX
+        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        mov dx,fsb             ; and the rendered wave, to check it offline
+        mov cx,0
+        mov ah,3ch
+        int 21h uses(ax,cx,dx) ; create: CX attributes, DS:DX name
+        jc @dumpfb_s
+        mov bx,ax
+        push ds
+        mov ds,[cs:sbseg]
+        xor dx,dx
+        mov cx,SBLEN*2         ; samples, two bytes each
+        mov ah,40h
+        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        pop ds
+        mov ah,3eh
+        int 21h uses(ax,bx)    ; close: BX the handle
+@dumpfb_s:
+        mov dx,portcnt
+        mov cx,512
+        mov ah,40h
+        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        mov ah,3eh
+        int 21h uses(ax,bx)    ; close: BX the handle
+@dumpfb_z:
+        ret
+fshot:
+        db "SHOT.RAW",0
+fsb:
+        db "SB.BIN",0
+fvram:
+        db "VRAM.BIN",0
+freg:
+        db "REGS.BIN",0
+  endif
+end macro
