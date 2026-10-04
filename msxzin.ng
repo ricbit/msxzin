@@ -1,5 +1,6 @@
 ; msxzin.ng -- an MSX1 emulator for 8086 real mode, in one file: the Z80 core,
 ; the machine, and (under -DZEX) the ZEXDOC harness that verifies the core.
+; Copyright © 2026 by Ricardo Bittencourt
 ;
 ; The machine: four slots behind PPI port A -- 0 the 32K BIOS (bios.rom),
 ; 1 the cartridge (plain up to 32K mirrored, Konami4/Konami5 MegaROMs,
@@ -31,7 +32,7 @@ endif                          ; 100h and run bare.
 
 org IMGORG
 
-include "debug.ng"             ; the debug hooks and their knobs.
+debug include "debug.ng"       ; the debug hooks and their knobs.
 
 ; The SECOND byte of the ED trap.
 TRAP equ {237:080h↔09fh,0a4h↔0a7h,0ach↔0afh,0b4h↔0b7h,0bch↔0ffh}
@@ -129,7 +130,6 @@ macro vdpscreen(scr)           ; scr picks the screen: 0, 1, 2, 3.
     case 0,1:
         sub bx,bx              ; one flat table for SCREEN 0,1.
   end switch
-@th:
         mov [cs:thrd],bx       ; only the third is per-row news; the bases
                                ; join at the two use sites below.
 
@@ -219,7 +219,7 @@ draw_ctm:                      ; R3 bits 0..6 AND address bits 6..12. Masked
         mov al,ah enc(d1)
         add ch,ch
         jnc @put
-        mov al,dl enc(d1)
+        mov al,dl
 @put:
         stosb
         sub cl,-(-1)
@@ -251,7 +251,7 @@ draw_ctm:                      ; R3 bits 0..6 AND address bits 6..12. Masked
         sub di,2 enc(dec)
         lea di,[di+8]
     or draw_ctm3
-        times 2 dec di enc(gi)
+        sub di,2
         add di,8 same(scr0sum)
     or draw_ctm3
         add di,8 same(scr0sum)
@@ -410,14 +410,10 @@ zIX:
   zIY equ zIX+2                ; two are ONE allocation and IY is an offset into it.
 zR:
         resb 1 at BSSLO+72h
-eaok:
-        resb 1 at BSSLO+15h    ; set once (IX+d) has been resolved this instruction.
 eaddr:
         resw 1 at BSSLO+80h    ; eaddr inside one guest instruction,
   nbit  equ eaddr              ; nbit inside the mixer's sample loop, thrd inside
   thrd  equ eaddr              ; a row render: their live ranges are disjoint.
-cbhl:
-        resw 1 at BSSLO+0c8h   ; HL parked across a DDCB/FDCB.
 ziff:
         resb 1 at BSSLO+74h holds 0↔1 ; interrupt flip-flop.
 imode:
@@ -436,7 +432,7 @@ section pal
 ptab:
         db 10h,13h,1ch,1fh     ; must follow ptab.
         db 0fh                 ; invisible DAC byte; returned in AL as PEL mask.
-dsptab:                        ; must follow dsptab.
+        ; the DSP commands, which video leaves SI pointing at.
         db 41h,SBRATE>>8,SBRATE&0ffh,0b6h,10h,(SBLEN/2-1)&0ffh,(SBLEN/2-1)>>8
         debug snd_log_filename
 end section pal
@@ -474,7 +470,7 @@ end section boot
 section start_open
   ifndef ZEX
         dec si
-        mov dx,si
+        xchg dx,si
         mov ax,3d00h
         int 21h uses(ax,dx)    ; open: AL the mode, DS:DX the name.
         jc start_nof
@@ -567,17 +563,17 @@ section start_load
         xor bx,bx
         mov dx,fbios
         call loadfile
-        jc quit                ; without a BIOS there is nothing to run.
-        jmp start_hooks elided()
+        jnc start_hooks        ; without a BIOS there is nothing to run.
+        jmp quit
   endif
 end section start_load
 
 section start_hooks
   ifndef ZEX
-        mov di,0e1h            ; the six tape hooks sit at E1h and every third
+        mov cx,{4:3↔6}         ; the six tape hooks sit at E1h and every third
                                ; byte after it: TAPION, TAPIN, TAPIOF, TAPOON,
                                ; TAPOUT, TAPOOF.
-        mov cx,{4:3↔6}         ; each -> ED ED C9, and only the first THREE
+        mov di,0e1h            ; each -> ED ED C9, and only the first THREE
                                ; are needed: TAPION, TAPIN and TAPIOF are
                                ; reading.
 start_capa:
@@ -685,10 +681,10 @@ section start_eof
                                ; well, so closing it here would leave the drive
                                ; holding a stale one.
         pop ax                 ; the bank count again, whole: DI counted it
-        mov dx,ax              ; down to zero, and it must cross the fills in DX.
-        mov cx,ax enc(d1)
+        mov dx,ax enc(pushpop) ; down to zero, and it must cross the fills in DX.
+        mov cx,ax enc(pushpop)
         dec ax
-        mov ah,al              ; smear the top bit down: 47 becomes 63, and 1,
+        mov ah,al enc(d1)      ; smear the top bit down: 47 becomes 63, and 1,
         shr ah,1               ; 3, 7, 15 and 31 are left as they were.
         or al,ah
         mov [bankmask],al      ; banks-1: a MASK only while every supported
@@ -702,15 +698,15 @@ section start_eof
         ; Sixteen kilobytes, and stopping there is what makes one hit enough.
         and al,0fch            ; only a MegaROM has a mapper to name, and the
         jz start_f1            ; test is wrb's own.
-        mov cx,2               ; materialise the first two banks contiguously.
+        mov bx,4000h           ; materialise the first two banks contiguously.
         xor al,al
-        mov bx,4000h
+        mov cx,2
         call fill
         mov bx,7ffdh           ; scan guest 4000h..7fffh backwards.
 start_a16s:
         cmp word [es:bx],0032h ; 32 00: LD (nn),A with a zero low byte...
         jne start_a16n
-        mov al,[es:bx+2] enc(d16) ; ...and a select for its high byte. AL, for
+        mov al,[es:bx+2]       ; ...and a select for its high byte. AL, for
         and al,0efh            ; the short accumulator forms: 6800 and 7800
         cmp al,68h             ; fold together while 4800 and 5800 keep bit 5.
         je start_a8k           ; ASCII8's two registers, which nothing else writes.
@@ -723,12 +719,18 @@ start_a16n:
         jae start_a16s
                                ; ...unless it is Hydlide 3, whose four
     alt start_eof1             ; ASCII8 selects sit at 1E08A and beyond, past
-        cmp byte [es:4004h],'H' ; anything a scan can afford to read, so only
-    or start_eof1              ; the ROM itself can say: `HY' of the HYDLIDE3
         cmp word [es:4004h],5948h ; its header carries, or just the `H'. Both are
+    or start_eof1              ; the ROM itself can say: `HY' of the HYDLIDE3
+        cmp byte [es:4004h],'H' ; anything a scan can afford to read, so only
     end alt start_eof1         ; unique among everything that reaches this
         je start_a8k           ; fallthrough.
-        mov byte [map2],0b9h   ; the scan ran out without either select:
+        mov ax,crossb-(map1+3)
+        cmp word [es:4035h],4532h ; Cross Blaim: LD (4045h),A at 4035h.
+        je start_xmap
+        mov al,hfox-(map1+3)   ; the scan ran out without either select:
+        mov byte [map2],0b9h   ; ASCII16, or Harry Fox, which is ASCII16
+        cmp word [es:6fddh],6000h ; with its own bank numbers: LD (6000h),A
+        je start_xmap          ; at 6FDCh names it.
         mov dl,2               ; an ASCII16. Its 16K registers both reset to
                                ; zero, so bank 0 has to show at 8000 as well as
                                ; at 4000, which the 16K-or-less fill below does.
@@ -739,12 +741,17 @@ start_a8k:
                                ; immediate swallows the JMP's displacement.
                                ; ASCII8 needs nothing else: the plain 0,1,2,3
                                ; fill below already is its reset state.
+start_xmap:
+        mov [map1+1],ax        ; Cross Blaim and Harry Fox aim map1's JMP at
+                               ; their own handler, and the plain fill is
+                               ; their reset state. For ASCII the store lands
+                               ; in the immediate the patched opcode swallows.
 start_a16k:
                                ; Konami/ASCII paths fall through here.
 start_f1:
-        mov cl,4               ; always seat all four 8K regions. The bank mask
+        mov bx,4000h           ; always seat all four 8K regions. The bank mask
                                ; mirrors 8K as 0,0,0,0 and 16K as 0,1,0,1.
-        mov bx,4000h
+        mov cl,4
 p1reset:
         mov al,0 smc()         ; PATCHED AT RUNTIME by `mov byte [p1reset+1]'.
                                ; The bank page 1 resets to: zero for every
@@ -794,7 +801,7 @@ sndini_w:
         in al,dx
         or al,al
         jns sndini_w
-        mov dx,SBBASE+0ah      ; drain the acknowledgement a real card leaves
+        add dl,-(004h)         ; drain the acknowledgement a real card leaves
         in al,dx               ; pending, which the next command would trip
                                ; over. The AAh in it is discarded.
 
@@ -805,7 +812,7 @@ sndini_w:
         add ax,((SBLEN/8))     ; and steps it on by its reserved slack if so.
 sndini_ok:
         push ax                ; the segment, kept HERE across the DMA setup
-        mov [sbseg],ax enc(gen) ; rather than read back out of the cell.
+        mov [sbseg],ax         ; rather than read back out of the cell.
         jmp sndma elided()
   endif
 end section sndinit
@@ -838,7 +845,7 @@ section sndma
         mov al,(SBLEN-1)>>8
         out 0c6h,al
         mov al,1               ; unmask.
-        mov cl,7               ; SI already points at dsptab from video.
+        mov cl,7               ; SI already points at the DSP commands, from video.
 
         debug snd_log_open
         out 0d4h,al
@@ -887,7 +894,7 @@ section quit
     endif
         mov dx,taildata
         mov ah,9
-        int 21h uses(ax,dx)    ; print string: DS:DX.
+        int 21h uses(ah,dx)    ; print string: DS:DX.
 memerr:
         mov ax,4c00h           ; OOM exits silently; normal quit printed above
         int 21h uses(ax) exit() ; terminate: AL is the exit code.
@@ -909,8 +916,8 @@ trashes bx
         mov ah,48h
         int 21h uses(ax,bx)
         jnc getmem_ok
-        mov ax,5801h
         xor bx,bx
+        mov ax,5801h
         int 21h uses(ax,bx)    ; set allocation strategy: BX.
         mov bx,1000h
         mov ah,48h
@@ -962,7 +969,7 @@ section frame
   endif                        ; captures pass -DNOTHROTTLE.
         pop si                 ; The PC, back in SI for irq to redirect.
         test byte [vregs+1],20h ; interrupts enabled in the VDP?
-        ret z target(frame_no)
+        ret z target(setr_plain)
         call irq
 frame_no:
         ret
@@ -973,8 +980,8 @@ end section frame
 
 section setr
 ; set r[y], AL=value. mem address for indexed form consumes displacement.
-input al bx dx
-output bx dx
+input al dl
+output bx dl
 trashes ax cx
         call rclass
         je setr_m
@@ -994,6 +1001,7 @@ setr_hi:
 end section setr
 
 section setr_plain
+input al bx
         mov [zC+bx],al         ; rclass already built the index in BX.
         ret
 end section setr_plain
@@ -1002,7 +1010,8 @@ inlined section dspw
 ; AL -> the DSP, once it will take it, or after 64K polls, so a machine with
 ; no DSP at 220h boots silent instead of hanging here on a black screen.
 input al
-output bx dx
+output bx
+trashes dx
 keeps ax bp cx di es si
         push ax
         xor bx,bx
@@ -1022,35 +1031,29 @@ end section dspw
 section edtab
 ; The ED dispatch table. XLAT reaches it through BX, and every entry is
 ; stored relative to ed_dispatch+2, the byte after the patched JMP SHORT.
-        db ed_inc, ed_outc short(ed_dispatch+2)
-        db ed_sbc16, ed_st16 short(ed_dispatch+2)
-        db ed_neg, ed_retn short(ed_dispatch+2)
-        db ed_imn, edspec short(ed_dispatch+2)
-        db ed_inc, ed_outc short(ed_dispatch+2)
-        db ed_adc16, ed_ld16 short(ed_dispatch+2)
-        db ed_neg, ed_retn short(ed_dispatch+2)
-        db ed_imn, edspec short(ed_dispatch+2)
+        db ed_inc, ed_outc, ed_sbc16, ed_st16 short(ed_dispatch+2)
+        db ed_neg, ed_retn, ed_imn, edspec    short(ed_dispatch+2)
+        db ed_inc, ed_outc, ed_adc16, ed_ld16 short(ed_dispatch+2)
+        db ed_neg, ed_retn, ed_imn, edspec    short(ed_dispatch+2)
         ; a second row for nibble 7/F, indexed by y. 4F, 77 and 7F are
         ; unimplemented and go to ednop, ed_imn's own RET reached one
         ; instruction later. It must NOT be ed_imn itself: 7F masks to 18h,
         ; so sharing it would let an undefined opcode select IM 2.
-        db ed_ldia, ednop short(ed_dispatch+2)
-        db ed_ldai, ed_ldar short(ed_dispatch+2)
-        db ed_rrd, ed_rld short(ed_dispatch+2)
-        db ednop, ednop short(ed_dispatch+2)
+        db ed_ldia, ednop, ed_ldai, ed_ldar   short(ed_dispatch+2)
+        db ed_rrd, ed_rld, ednop, ednop       short(ed_dispatch+2)
 end section edtab
 
 section kbd
 ; An int 9 handler gives held-key state, which the BIOS keyboard buffer
 ; cannot: the handler drives the real MSX key matrix, active low, and the
 ; games read it themselves through the PPI. Esc sets the quit flag.
-        push {kbirq:ds,si,bx,cx,ax}
+        push {kbirq:cx,ax,bx,ds,si}
         push cs
         pop ds                 ; our own data, so no segment overrides below.
         in al,60h
         mov bl,al
-        cbw                    ; bit 7 is the break bit, so AH is 00 for a
-        and bx,0ff7fh          ; press and FFh for a release: the matrix bit
+        and bx,0ff7fh          ; bit 7 is the break bit, so AH is 00 for a
+        cbw                    ; press and FFh for a release: the matrix bit
                                ; each wants, ready to shift out.
         push bx
         mov bh,0
@@ -1058,7 +1061,7 @@ section kbd
                                ; keyboard does not have. FFh reads as row 31,
                                ; column 7, a bit bucket the guest cannot see.
         mov al,[kmap+bx]       ; Rotate the wanted bit out, replace it through
-        mov bl,al enc(d1)      ; the carry, and rotate the byte back: no mask
+        mov bl,al              ; the carry, and rotate the byte back: no mask
         mov cl,3               ; to build and no branch on which way to go.
         shr bl,cl              ; BL is the row, AL the column.
         and al,7
@@ -1068,10 +1071,10 @@ section kbd
         rcr byte [bx+si],1     ; out with the old bit, in at bit 7
         inc cx                 ; and a rotate of column+1 puts it back where
         rol byte [bx+si],cl    ; it belongs, every other bit restored.
-        pop bx
-        cmp bl,1               ; Esc quits
+        pop ax
+        cmp al,1               ; Esc quits
         jne kbd_out
-        mov [quitf],bl         ; BL is the 1 the compare just matched.
+        mov [quitf],al         ; BL is the 1 the compare just matched.
 kbd_out:
         mov al,{36:20h↔27h}    ; a non-specific EOI is OCW2 001 0 0 LLL, and
                                ; the level field is consulted only when SL is
@@ -1082,6 +1085,9 @@ kbd_out:
 end section kbd
 
 section setr_m
+input al bp bx
+output bp bx
+trashes cx
         push ax
         call memaddr
         pop ax
@@ -1109,7 +1115,7 @@ keeps bx dx es si
         mov ch,[curslot]
         shr ch,cl              ; the slot this page is showing, in bits 1:0.
         shr ch,1               ; The slot through the carry: 0 and 2 shift
-        ret nc target(rclass_p) ; out a 0 first and refuse the write, 3 sends
+        ret nc target(getr_m)  ; out a 0 first and refuse the write, 3 sends
         shr ch,1               ; two 1s straight to RAM, and slot 1 falls
         jc wrb_w               ; through as the cartridge.
         cmp bh,98h             ; the SCC's window sits inside region 2, so it
@@ -1131,6 +1137,8 @@ section flags
 end section flags
 
 section wrb_nsc
+input al bx
+output ch cl
                                ; a write anywhere in an 8K region of the
                                ; cartridge names that region's bank. Konami4
                                ; selects at 6000/8000/A000 and Konami5 at
@@ -1156,9 +1164,10 @@ section wrb_nsc
 wrb_nas:
 map1:
         jmp swbank smc()       ; Konami: one 8K bank, its region named by BX
+map1_ascii:
         sub bh,(60h)           ; both ASCII mappers keep every register in
         cmp bh,20h             ; 6000-7FFF, which becomes 00-1F once 60h is
-        ret ae target(getr_m)  ; taken off while everything else fails the
+        ret ae target(wrb)     ; taken off while everything else fails the
                                ; unsigned compare. The rest of the window is
                                ; ordinary ROM a write must not touch.
         and bx,1800h           ; The register lives in bits 12:11, and two
@@ -1167,15 +1176,40 @@ map1:
         sub bh,-(40h)          ; 7800->A000. The AND clears BL for free.
 map2:
         jmp swbank smc()       ; ASCII8: one 8K bank at that region
-        ret p target(wrb)      ; ASCII16 owns only 4000 and 8000, and those
+        ret p target(getr_plain) ; ASCII16 owns only 4000 and 8000, and those
                                ; two BHs have odd parity where 6000 and A000
                                ; have even, so ADD's own PF sorts them.
+wrb_16k:
         add al,al              ; 16K bank N is 8K banks 2N and 2N+1, so it is
         mov cx,2               ; two consecutive regions seated from bank 2N,
-        jmp fill               ; which is precisely what fill does.
+        call fill              ; which is precisely what fill does.
+        ret
 end section wrb_nsc
 
+section crossb
+; Cross Blaim: a write anywhere in the cartridge picks the 16K bank at 8000
+; from its low two bits, 0 and 1 both meaning bank 1 (openMSX RomCrossBlaim).
+; Pages 0 and 3 are not unmapped for banks 2 and 3: no game maps them here.
+        and al,3
+        cmp al,1               ; 0 becomes 1: only 0 borrows.
+        adc al,0
+        mov bx,8000h
+        jmp wrb_16k
+end section crossb
+
+section hfox
+; Harry Fox: ASCII16's registers, but bank 2*(v&1) at 4000 from 6000h and
+; 2*(v&1)+1 at 8000 from 7000h (openMSX RomHarryFox). Pages 0 and 3 stay
+; mapped.
+        and al,1
+        add al,al
+        cmp bh,70h             ; the 7000h register adds one.
+        sbb al,-1
+        jmp map1_ascii
+end section hfox
+
 section wrb_w
+input al bx
         mov [es:bx],al
         ret
 end section wrb_w
@@ -1193,11 +1227,11 @@ section rclass
 ; With a prefix, plain is 0-3 and 7, memory 6, index-half 4-5, and XOR 3
 ; sorts them into 0-4 / 5 / 6-7: one CMP DL,5 again.
 input bp dl
-output bh bl bp cf zf
+output bh bl cf zf
 keeps ax cx di es si
         mov bl,dl
-        mov bh,0
         xor bl,1
+        mov bh,0
         or bp,bp
         jnz rclass_p
         cmp bl,7
@@ -1205,6 +1239,8 @@ keeps ax cx di es si
 end section rclass
 
 section rclass_p
+input dl
+output dl cf zf
         xor dl,3
         cmp dl,5
         ret
@@ -1244,8 +1280,8 @@ end section flags_sub_ov
 section getr
 ; get r[z], where encoding 0..7 = B C D E H L (HL) A
 ; IN DL=index, OUT AL=value. Prefix substitutes IXH/IXL/IYH/IYL and (IX+d).
-input al bx dx
-output al bx dx
+input dl
+output al bx dl
         call rclass
         je getr_m
         jc getr_plain
@@ -1257,21 +1293,28 @@ output al bx dx
 end section getr
 
 section getr_hi
+input ah
+output al
         mov al,ah enc(d1)
         ret
 end section getr_hi
 
 section memaddr_again
+output bx
         mov bx,[eaddr]         ; same instruction, same address.
         ret
 end section memaddr_again
 
 section getr_plain
+input bx
+output al
         mov al,[zC+bx]         ; rclass already built the index in BX.
         ret
 end section getr_plain
 
 section getr_m
+input bp bx
+output al bp bx
         call memaddr
         mov al,[es:bx]
         ret
@@ -1300,6 +1343,9 @@ keeps cx dx es
 end section memaddr
 
 section memaddr_idx
+input bp bx si
+output bp bx
+trashes ax
         test bp,1
         jz memaddr_again
         call eadisp
@@ -1322,23 +1368,7 @@ keeps si bl
         sub bh,-(20h)
         loop fill
         ret
-; .stop and its scaffolding exist only when something can reach them.
-; This chain sits here, after -DZEX has implied -DCPM, not at the top.
-  ifdef TRAPPC
-    define STOPPATH 1
-  endif
-  ifdef TRAPCART
-    define STOPPATH 1
-  endif
-  ifdef TRAPLOW                ; it jumps to run_stop like the compares above.
-    define STOPPATH 1
-  endif
-  ifdef CPM
-    define STOPPATH 1
-  endif
-  ifdef LIMIT
-    define STOPPATH 1
-  endif
+        debug stop_path_defs   ; after -DZEX has implied -DCPM.
 end section fill
 
 section cb_plain
@@ -1359,7 +1389,7 @@ cb_have:
         mov bl,al
         mov al,ah enc(d1)
         shr al,6 enc(cl)
-        sub al,1               ; 0 borrows (rotate), 1 zeroes (BIT), and
+        cmp al,1               ; 0 borrows (rotate), 1 zeroes (BIT), and
         jc cb_rot              ; RES/SET keep arriving below as 1 and 2.
         jz cb_bit
         ; RES/SET
@@ -1368,10 +1398,9 @@ cb_have:
         jae cb_set
         not al
         and bl,al
-        eat 0b9h               ; MOV CX,imm16 swallows the SET body.
+        eat 0b8h               ; MOV CX,imm16 swallows the SET body.
 cb_set:
         or bl,al
-cb_store:
         mov al,bl enc(d1)
 cbst:
         call setr
@@ -1404,7 +1433,7 @@ section cb_rot
 ; borrows RCL with a 1 forced into CF.
         call getcy             ; y -> CX, CH already zero
         mov al,bl enc(d1)      ; the operand, before BX becomes the index.
-        mov bx,cx enc(d1)
+        mov bx,cx
         mov ah,[cbtab+bx]
         mov [cb_rot_p+1],ah
         cmp bl,6               ; CMP writes CF, so the carry the rotate needs
@@ -1415,7 +1444,7 @@ cb_rot_nsll:
         shr ch,1               ; ...and this is the only flag write left.
 cb_rot_p:
         db 0d0h,7 smc()        ; ro<x>/sh<x> al,1.
-cb_rot_rf:                     ; 8086 rotates/shifts set only CF and OF, so S/Z/P
+        ; 8086 rotates/shifts set only CF and OF, so S/Z/P
         ; must be derived from the result.
   alt cb_rot1                  ; F_C is bit 0, so RCL puts the carry exactly
         mov cl,0               ; where the Z80 flag wants it, and no branch.
@@ -1432,6 +1461,7 @@ cb_rot_rf0:                    ; end of the block.
 end section cb_rot
 
 section sndoff
+trashes ax dx bx
 
 ; The PSG and SCC render as sampled waves, pushed out of a Sound Blaster by
 ; auto-init DMA: real square waves and the PSG's own noise LFSR, not an FM
@@ -1459,7 +1489,7 @@ section sndoff
 ; sound looping under DOS.
         mov al,0d5h            ; pause the transfer, then stop it re-arming.
         call dspw              ; No speaker switch: D3h has no practical
-        mov al,0d9h            ; effect on the output signal of a 4.xx DSP.
+        add al,4               ; effect on the output signal of a 4.xx DSP.
         call dspw
         mov al,5               ; Then mask the channel, so the DMA controller
         out 0d4h,al            ; stops reading memory DOS is about to reuse.
@@ -1498,7 +1528,8 @@ inlined section eadisp
 ; (IX+d)/(IY+d): fetch the displacement, sign-extend it, add it to the
 ; effective HL.
 input bx si
-output ax bx si
+output bx si
+trashes ax
 keeps cx dx
         FETCH8                 ; the displacement byte.
         cbw
@@ -1573,19 +1604,16 @@ alu_do:                        ; forward-LOOP chain, bodies inline: LOOP
         xor ch,ch
         inc cx
         loop alu_adc_h
-alu_add:
         add al,bl enc(d1)
 alu_addf:                      ; shared tails: JMP and CALL leave flags alone.
         mov cx,0d100h          ; S Z H C; the result above is still live
         call flagsc            ; when flagsc runs LAHF, since MOV spares flags.
-alu_sta:
         mov [zA],al
         ret
 end section x2
 
 section alu_adc_h
         loop alu_sub_h
-alu_adc:
         mov cl,[zF]
         shr cl,1               ; CF = guest carry, and ONLY the carry is
                                ; wanted.
@@ -1595,7 +1623,6 @@ end section alu_adc_h
 
 section alu_sub_h
         loop alu_sbc_h
-alu_sub:
         sbb al,bl
 alu_subf:
         call flags_sub_ov
@@ -1605,7 +1632,6 @@ end section alu_sub_h
 
 section alu_sbc_h
         loop alu_and_h
-alu_sbc:
         mov cl,[zF]
         shr cl,1               ; CF = guest carry, and ONLY the carry is
                                ; wanted.
@@ -1615,7 +1641,6 @@ end section alu_sbc_h
 
 section alu_and_h
         loop alu_xor_h
-alu_and:
         and al,bl
         call flags
         or byte [zF],F_H       ; AND sets H.
@@ -1663,6 +1688,10 @@ end section msxio_inn
 section msxio
 ; IN/OUT and DI/EI live here rather than inline in z3_3: the x3 dispatcher is a
 ; LOOP-hop chain and LOOP only reaches +127 bytes.
+input si
+output si
+trashes ax bx cx dx di flags
+keeps bp
         FETCH8
         mov dl,al              ; MSX decodes only the low port byte.
         mov al,[zA]
@@ -1696,7 +1725,6 @@ end section run_go
 
 section alu_xor_h
         loop alu_or_h
-alu_xor:
         xor al,bl
 alu_parf:
         call flags
@@ -1706,13 +1734,16 @@ end section alu_xor_h
 
 section alu_or_h
         loop alu_cp
-alu_or:
         or al,bl
         jmp alu_parf
 end section alu_or_h
 
 section getHL
 ; HL with DD/FD substitution. AX <- effective 16-bit HL-ish register.
+input bp
+output ax flags
+trashes di
+keeps bp cx dx bx
         call hlgrp
         mov ax,[di]
         ret
@@ -1892,6 +1923,9 @@ ednop:
 end section ed_imn
 
 section ed_outc
+input ah bp si
+output bp si
+trashes ax bx cx dx di flags
         call gety
         call getr
         mov dl,[zC]
@@ -2010,8 +2044,8 @@ ed_rrd:
         shl ah,cl              ; RLD: (HL) = (m<<4) | (A&0F).
         and ch,0fh
         or ah,ch
-        mov [es:bx],ah
         and al,0f0h
+        mov [es:bx],ah
         mov ch,dh
         shr ch,cl              ; A = (A&F0) | (m>>4).
         jmp ed_rrd_done
@@ -2022,13 +2056,12 @@ section ed_rrd_rrd
         shr ah,cl
         shl ch,cl
         or ah,ch
-        mov [es:bx],ah
         and al,0f0h
+        mov [es:bx],ah
         mov ch,dh
         and ch,0fh             ; A = (A&F0) | (m&0F).
 ed_rrd_done:
         or al,ch
-rrdf:
         mov [zA],al
         call getcf
 
@@ -2186,7 +2219,7 @@ blkio_adv:
         add al,F_N
         dec byte [zB]
         jnz blkio_nz
-        sub al,-(F_Z)
+        add al,F_Z
 blkio_nz:
         mov [zF],al
         or bp,bp
@@ -2301,7 +2334,6 @@ input si
         jc dsktrap_io          ; sorts all four: 12h borrows (DSKIO), 15h zeroes
         jnz dsktrap_ok         ; (DSKCHG, just below), and the rest are DSKFMT
                                ; and MTOFF, which succeed by doing nothing.
-dsktrap_chg:
         mov byte [zB],1        ; the disk has not changed.
 dsktrap_ok:
         and byte [zF],0feh     ; success: carry clear.
@@ -2331,7 +2363,7 @@ section dsktrap_io
         ; A real interface restores the caller's page 1 around the transfer; the
         ; window is switched to all-RAM and back to do the same.
         push bx                ; BX is the handle, and setslot uses it.
-        mov al,0ffh
+        or al,0ffh
         call setslot
         pop bx
         push ax                ; what setslot replaced, for putting it back.
@@ -2347,7 +2379,7 @@ section dsktrap_io
         mov al,[zF]            ; the DOS call number IS the guest's carry plus
         and al,1               ; 3Fh, 3Fh read and 40h write, and it is read
         add al,3fh             ; BEFORE the DS switch below: zF is OUR variable,
-        mov ah,al enc(d1)      ; and after `pop ds' this code addresses the
+        mov ah,al              ; and after `pop ds' this code addresses the
                                ; GUEST's memory.
         push ds
         push es
@@ -2367,10 +2399,10 @@ dsktrap_zero:                  ; flag, so DOS's carry survives the label,
         popf
         jnc dsktrap_ok         ; clean: carry clear, and return.
         mov al,12              ; the host refused. "Other error", because it
-        eat 0b9h               ; did not say why in a code this BIOS has.
-dsktrap_nr:                    ; B9 eats the two bytes below as its immediate,
+        eat 03dh               ; did not say why in a code this BIOS has.
+dsktrap_nr:                    ; 3D, CMP AX,imm16, eats the two bytes below,
         mov al,2               ; so falling through KEEPS al=12 while jumping
-dsktrap_err:                   ; here sets al=2 -- one epilogue, two errors.
+        ; here sets al=2 -- one epilogue, two errors.
         mov [zA],al
         jmp cas_eof            ; `or byte [zF],1 / ret', the carry setter the
                                ; tape path already owns.
@@ -2408,7 +2440,7 @@ section x0
         inc cx
         loop x0h1
 
-z0:                            ; NOP / EX AF,AF' / DJNZ / JR / JR cc.
+        ; NOP / EX AF,AF' / DJNZ / JR / JR cc.
         ; y must live in DL: fetching the displacement overwrites AL, and CBW
         ; then overwrites AH, so the opcode is gone by the time we branch.
         call gety
@@ -2444,7 +2476,7 @@ end section exaf
 
 section x0h1
         loop x0h2
-z1:                            ; LD rp,nn / ADD HL,rp.
+        ; LD rp,nn / ADD HL,rp.
         call getp
         test ah,8
         jnz add16hl
@@ -2470,7 +2502,7 @@ end section z2_sthl
 
 section x0h2
         loop x0h3
-z2:                            ; LD (BC/DE/nn),A/HL and inverse. The address depends only on p, and
+        ; LD (BC/DE/nn),A/HL and inverse. The address depends only on p, and
         ; the direction only on q, so compute the address once instead of
         ; mirroring the whole thing for load and store.
         mov dh,ah              ; fetch16/getrp clobber AH.
@@ -2502,6 +2534,8 @@ z2_have:
 end section z2_rp
 
 inlined section setHL
+input ax bp
+trashes di flags
         call hlgrp             ; preserves AX, the value being stored.
         mov [di],ax
         ret
@@ -2519,9 +2553,9 @@ end section corehead
 inlined section loadfile
 ; DS:DX = name, BX = guest offset, CX = max bytes.
 input cx dx
-output ax bp cx di dx si sp cf
-trashes bx                     ; the file handle, from the XCHG.
-keeps es
+output dx cf
+trashes ax bx                  ; BX is the file handle, from the XCHG.
+keeps bp cx di es si sp
         push bx                ; guest offset
         push cx                ; byte count
         mov ax,3d00h           ; DS:DX still points at the name
@@ -2529,7 +2563,7 @@ keeps es
         pop cx                 ; POP leaves the carry alone
         pop dx                 ; buffer offset within the guest segment
         jc loadfile_none       ; no such file: leave the region as it is
-        xchg ax,bx enc(orient) ; handle
+        mov bx,ax              ; handle
         push ds
         push es                ; the destination rides in ES.
         pop ds
@@ -2552,7 +2586,7 @@ end section halt
 
 section x0h3
         loop x0h4
-z3:                            ; INC/DEC rp
+        ; INC/DEC rp
         ; getrp returns the pair in AX, so it destroys the opcode in AH. Latch
         ; the inc/dec bit in DH first, or INC HL runs as DEC HL whenever H has
         ; bit 3 set.
@@ -2574,7 +2608,7 @@ section z2_ldhl
 end section z2_ldhl
 
 inline section getcy
-input ah ch
+input ah
 output cx
 keeps si bp
         mov cl,ah              ; y into CL, for the shift-by-CL forms.
@@ -2585,7 +2619,7 @@ end section getcy
 
 section x0h4
         loop x0h5
-z4:                            ; INC r[y]: identical to DEC below but for the one arithmetic
+        ; INC r[y]: identical to DEC below but for the one arithmetic
         call gety              ; byte and the N seed, so it joins the tail.
         push dx
         call getr
@@ -2596,7 +2630,7 @@ end section x0h4
 
 section x0h6
         loop x0h7
-z6:                            ; LD r[y],n
+        ; LD r[y],n
         call gety
         push dx
         ; indexed (IX+d),n consumes displacement before immediate.
@@ -2615,7 +2649,7 @@ end section x0h6
 
 section x0h5
         loop x0h6
-z5:                            ; DEC r[y]
+        ; DEC r[y]
         call gety
         push dx
         call getr
@@ -2658,7 +2692,7 @@ section x0h7
         ;   H, N=0 = (A&0Fh)>9 ; N=1 = H_in and (A&0Fh)<6
         ; So compute those first in CL, run the host adjust for A, and splice.
         mov ax,[zA]            ; stored A,F, which is what LAHF/SAHF want.
-        mov ch,al
+        mov ch,al enc(d1)
         and cx,0f00h           ; flag accumulator in CL.
         cmp al,154
         jb z7_cc
@@ -2762,7 +2796,6 @@ section x3
         inc cx
         loop x3h1
 
-retcc:
         call gety
         call cond
         jc op_ret              ; branch on the condition itself.
@@ -2771,30 +2804,29 @@ end section x3
 
 section x3h1
         loop x3h2
-z3_1:
         test ah,8
         jnz z3_1_q1
         ; POP rp2
         call getp
         call popz
         cmp dl,3
-        je z3_1_popaf
-        jmp strpnx
+        jne strpnx
+        jmp z3_1_popaf elided()
 end section x3h1
 
 section z3_1_popaf
         xchg al,ah             ; POP AF wants A high, storage is A low.
         mov [zA],ax
-ra:
         ret
 end section z3_1_popaf
 
 section q1a
         loop q1b
+  alt q1a1
         push si                ; EXX borrows SI, which holds the guest PC now.
-        mov si,zC              ; BC,DE,HL are six contiguous bytes and so
+        mov cl,6               ; BC,DE,HL are six contiguous bytes and so
         mov di,zC2             ; are their primes, so one byte-wise XCHG loop
-        mov cl,6               ; swaps all three pairs.
+        mov si,zC              ; swaps all three pairs.
 op_ret_x:
         lodsb                  ; Not MOVSB: that copies rather than swaps.
         xchg al,[di]
@@ -2802,6 +2834,28 @@ op_ret_x:
         inc di
         loop op_ret_x
         pop si
+  or q1a1                      ; ...or unrolled: one word swap per pair.
+        mov ax,[zC]
+        xchg ax,[zC2]
+        mov [zC],ax
+        mov ax,[zE]
+        xchg ax,[zE2]
+        mov [zE],ax
+        mov ax,[zL]
+        xchg ax,[zL2]
+        mov [zL],ax
+  or q1a1                      ; ...or the byte loop's body six times over.
+        push si
+        mov si,zC
+        mov di,zC2
+    repeat 6
+        lodsb
+        xchg al,[di]
+        mov [si-1],al
+        inc di
+    end repeat
+        pop si
+  end alt q1a1
         ret
 end section q1a
 
@@ -2819,6 +2873,9 @@ end section z3_1_q1
 
 section getbit
 ; AL = 1 << y, the bit BIT/RES/SET operate on.
+output al cx
+trashes flags
+keeps ah dx bx
         call getcy
         mov al,1
         shl al,cl
@@ -2847,7 +2904,6 @@ end section exdehl
 
 section x3h2
         loop x3h3
-jpcc:
         call gety
         call fetch16
         call cond              ; cond works in SI, CH and DL, so the operand
@@ -2859,7 +2915,6 @@ section x3h3
         loop x3h4
 ; y counts down through a DEC cascade: after five DECs, DI and EI sit at
 ; 1 and 2, so one more DEC makes DL the IFF value itself.
-z3_3:
         call gety
         dec dl
         js jpnn                ; y=0
@@ -2874,7 +2929,6 @@ z3_3:
         jz exdehl              ; y=5
         dec dl                 ; y=6,7 -> DL=0,1 = the new IFF state.
         mov [ziff],dl
-rb:
         ret
 end section x3h3
 
@@ -2899,7 +2953,6 @@ end section jpnn
 
 section x3h4
         loop x3h5
-callcc:
         call gety
         call fetch16           ; which leaves the operand in BX as well as AX,
         call cond              ; and cond touches neither.
@@ -2909,7 +2962,6 @@ end section x3h4
 
 section x3h5
         loop x3h6
-z3_5:
         test ah,8
         jnz z3_5_q1
         ; PUSH rp2
@@ -2925,7 +2977,6 @@ section z3_5_af
         xchg al,ah
 z3_5_push:
         call pushz
-rc:
         ret
 end section z3_5_af
 
@@ -2963,7 +3014,6 @@ end section callnn
 
 section x3h6
         loop x3h7
-alui:
         FETCH8
         mov bl,al
         call gety
@@ -2977,6 +3027,9 @@ section hlgrp
 ; DI is the only address register free at every call site.
 ; The only prefixes that reach here are 0, DDh and FDh. XCHG borrows AX to
 ; inspect BP's low byte; the high byte is the block-op repeat flag.
+output di flags
+input bp
+keeps ax cx dx bx
         mov di,zL
         xchg ax,bp
         test al,al
@@ -3032,7 +3085,8 @@ section setslot
 ;
 ; AL in is the value written; AL out is the mapping it replaced.
 input al bx ch di sp
-output ax bx cx di sp
+output al bx cx di sp
+trashes ah
 keeps dx si bp
         mov ah,al enc(d1)
         xchg al,[curslot]      ; AL = the mapping being replaced, AH = the one
@@ -3082,18 +3136,17 @@ end section setslot_ram
 
 section setslot_fill
         mov cx,4000h
-        mov al,0ffh
+        or al,0ffh
         rep stosb
 setslot_nxp:
         pop ax
         mov cl,2               ; next page's two bits. ROR, not SHR, on the
-        shr ah,cl ?? ror ah,cl ; outgoing mapping: four rotations of two bits
+        shr ah,cl              ; outgoing mapping: four rotations of two bits
         ror al,cl              ; put AL back exactly as it came in.
         inc bl
         cmp bl,4
         jb setslot_pg
         pop si
-setslot_x:
         ret
 end section setslot_fill
 
@@ -3196,7 +3249,7 @@ section portout_second
 end section portout_second
 
 section portout_reg
-input al dx
+input al
 trashes ax bx cx dx di es flags
         debug log_vdp_write
         and ax,7 enc(w16)      ; masks the register number and clears AH.
@@ -3235,6 +3288,9 @@ section portout_vdata
 end section portout_vdata
 
 section ports
+input al dl
+trashes ax bx cx dx di flags
+keeps si bp
         debug port_hist_count  ; -DSHOT: the OUT histogram, one tick per OUT.
 ; A destructive decoder: normalise once and walk the differences.
         sub dl,98h
@@ -3270,6 +3326,8 @@ section portout_psgsel
 end section portout_psgsel
 
 section portin_vdata
+output al
+trashes bx
 ; The VDP does not answer a data-port read with the byte AT the address:
 ; it answers with one it read ahead, then refills.  Setting the address for
 ; reading primes the buffer, so the address always runs one in front of the
@@ -3303,6 +3361,7 @@ keeps bp cx di es si
 end section portin
 
 section svno
+output cf
         stc
         ret
 end section svno
@@ -3316,7 +3375,7 @@ section sprvis
 ; is a single pattern of eight bytes. vdpmap reads R1 bit 1 and patches the
 ; height into ..@szc and the pattern mask into ..@szm, so one renderer draws
 ; both.
-input ah cl si bp
+input si
 output ax cl bp cf
 keeps dx di
         mov al,[si]            ; y
@@ -3500,7 +3559,6 @@ vdpmap_nomag:
         mov [szc+1],al         ; One height, which sprvis hands to both
         mov [szm+1],ah         ; passes, and the mask riding along in AH.
 
-vdpmap_geo:
         ret
 end section vdpmap
 
@@ -3563,7 +3621,7 @@ sndupd_np:
         mov dx,5               ; the noise generator's master frequency is the
         mov ax,08e8h           ; SAME 111861 Hz the tone generators run at, so
         div bx                 ; the same 329896 serves both.
-        mov [ninc],ax
+        mov [ninc],ax enc(gen)
 
         ; Envelope increment. The AY's envelope is a 16-state machine whose
         ; CYCLE runs at PSGclk/(256*EP), so the 32-bit accumulator advances
@@ -3641,14 +3699,14 @@ sndupd_f:
         debug snd_log_mark
 sndupd_smp:
         mov ax,[einc]          ; step the envelope before the voices.
-        mov bx,amptab          ; both lookups below are XLATs through this one
-        mov dx,[einc+2]        ; table: the level from its lower half, the
+        mov dx,[einc+2]        ; both lookups below are XLATs through this one
+        mov bx,amptab          ; table: the level from its lower half, the
         add [ephase],ax        ; state transition from its upper.
         adc [ephase+2],dx
         jnc sndupd_enw         ; a carry out is one completed cycle. R13 is
         mov al,[psgregs+13]    ; MUTABLE state: it carries the envelope's
-        and al,0fh             ; CURRENT state, and one lookup decides CONT,
-        or al,10h              ; ALT and HOLD together.
+        and al,01fh            ; CURRENT state, and one lookup decides CONT,
+        or al,010h             ; ALT and HOLD together.
         xlat
         mov [psgregs+13],al
         and al,80h             ; bit 7: this state holds where it landed.
@@ -3656,7 +3714,7 @@ sndupd_smp:
         mov byte [ephase+3],0ffh
         xor ax,ax              ; a frozen envelope stops advancing, so the
         mov [einc],ax          ; read below keeps returning the same level.
-        mov [einc+2],ax enc(gen)
+        mov [einc+2],ax
 sndupd_enw:
         mov al,[ephase+3] enc(gen) ; high nibble = the step, and ((x^31)>>1) is
         mov cl,4               ; ((x>>1)^15): drop the fifth bit first and
@@ -3702,7 +3760,7 @@ sndupd_pv:
         mov dx,[phase+si]
         add dx,[pinc+si]
         mov [phase+si],dx
-        add dh,dh              ; CF = the top bit of the phase, which IS the
+        rol dh,1               ; CF = the top bit of the phase, which IS the
         sbb al,al              ; square: no waveform table needed.
         shr cl,1
         sbb bl,bl              ; a disabled input is a constant 1, so OR in all
@@ -3821,7 +3879,7 @@ sprites_cl:
                                ; fifth-by-number.
         cmp bp,di              ; keep the LOWEST such line.
         jae sprites_c5
-        mov al,dl enc(d1)
+        mov ax,dx
         add al,0c0h            ; F and 5S and the number in one byte.
         mov [cs:vstat],al
         mov di,bp enc(d1)
@@ -3903,7 +3961,7 @@ sprites_sp:
         test byte [es:di+bx],20h enc(d16)
         jz sprites_nocol
   end alt szm3
-        or byte [cs:vstat],20h ?? mov byte [cs:vstat],0a0h
+        or byte [cs:vstat],20h ; C, keeping any F/5S/number the first pass set.
 sprites_nocol:
         mov [es:di+bx],dl      ; magnification can leave it there for a
 sprites_snx:                   ; second screen pixel.
@@ -3952,13 +4010,6 @@ section draw1
         jmp sprites
 end section draw1
 
-ifdef ZEX
-  define NOVIDPATH 1
-endif
-ifdef NOVID
-  define NOVIDPATH 1
-endif
-
 section text40
         vdpscreen 0
 
@@ -3967,14 +4018,13 @@ section text40
 ; The margins run AFTER the shared renderer: they erase the previous
 ; mode's side pixels AND the two-pixel spill the last six-wide cell's
 ; eight-wide draw leaves in the right margin.
-marg:
         mov al,[cs:vregs+7]    ; paint the eight columns either side the
         and ax,0fh             ; backdrop, starting one line EARLIER: a line's
         mov bp,193             ; right margin, the 64 border pixels and the
         mov di,3*320+280       ; next line's left margin are one contiguous
                                ; run of 8+64+8.
 margl:
-        mov cl,80
+        sub cl,176
         rep stosb
         add di,240             ; over the 240 text pixels to the next margin.
         dec bp

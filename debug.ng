@@ -1,4 +1,5 @@
 ; DEBUG HOOKS AND THEIR KNOBS, included by msx.ng.
+; Copyright © 2026 by Ricardo Bittencourt
 ;
 ; THIS IS MACHINE GENERATED - no human eyes ever looked here, beware.
 ;
@@ -16,10 +17,8 @@
 ; that a line is a hook. A misspelt name is still an error, because an unknown
 ; macro reaches the encoder and is refused there.
 ;
-; NOT here: the STOPPATH chain. It has to run AFTER -DZEX has implied -DCPM,
-; so it sits where it always did, next to the .stop scaffolding it guards.
-; That ordering is exactly what an include moves, and build.sh assembles all
-; nineteen knobs on every run to catch it if it ever does.
+; The STOPPATH chain must run AFTER -DZEX has implied -DCPM, so msx.ng calls
+; its hook, stop_path_defs, where the chain always sat.
 
 ; Debug knobs, usable in any build
 ifdef TRACE
@@ -101,7 +100,7 @@ macro snd_log_write()
         pop ds                 ; DS:DX = the half just rendered
         mov cx,SBLEN           ; a half is SBLEN bytes, not SBLEN samples
         mov ah,40h
-        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        int 21h uses(ax,bx,cx,dx) writes(ax) ; write: BX handle, CX count, DS:DX buffer
         pop ds
   endif
 end macro
@@ -237,7 +236,7 @@ macro snd_log_open()
         mov dx,fsnd
         xor cx,cx
         mov ah,3ch
-        int 21h uses(ax,cx,dx) ; create: CX attributes, DS:DX name
+        int 21h uses(ax,cx,dx) writes(ax) ; create: CX attributes, DS:DX name
         pop ds
         mov [sndh],ax          ; DOS closes it for us at exit
   endif
@@ -312,7 +311,7 @@ ptrace_hex8:
         mov dl,al
 ptrace_put:
         mov ah,2
-        int 21h uses(ax,dx)    ; display character: DL
+        int 21h uses(ax,dx) writes(ax) ; display character: DL
         ret
   endif
 end macro
@@ -334,6 +333,25 @@ tleft:
     else                       ; once and the result is never rescanned, so that
         dd LIMIT               ; spelling reached the assembler as a SYMBOL named
     endif                      ; TRACE and -DTRACE=N could not build at all
+  endif
+end macro
+
+; .stop and its scaffolding exist only when something can reach them.
+macro stop_path_defs()
+  ifdef TRAPPC
+    define STOPPATH 1
+  endif
+  ifdef TRAPCART
+    define STOPPATH 1
+  endif
+  ifdef TRAPLOW                ; it jumps to run_stop like the compares above.
+    define STOPPATH 1
+  endif
+  ifdef CPM
+    define STOPPATH 1
+  endif
+  ifdef LIMIT
+    define STOPPATH 1
   endif
 end macro
 
@@ -553,7 +571,7 @@ bdos:
         mov dl,[zE]
 @bdos_putc:
         mov ah,2
-        int 21h uses(ax,dx)    ; display character: DL
+        int 21h uses(ax,dx) writes(ax) ; display character: DL
 @bdos_done:
         ret
 @bdos_str:
@@ -651,7 +669,7 @@ dumpfb:
         mov dx,fshot
         mov cx,0
         mov ah,3ch
-        int 21h uses(ax,cx,dx) ; create: CX attributes, DS:DX name
+        int 21h uses(ax,cx,dx) writes(ax) ; create: CX attributes, DS:DX name
         jc @dumpfb_x
         mov bx,ax
         push ds
@@ -660,17 +678,17 @@ dumpfb:
         xor dx,dx
         mov cx,0fa00h
         mov ah,40h
-        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        int 21h uses(ax,bx,cx,dx) writes(ax) ; write: BX handle, CX count, DS:DX buffer
         pop ds
         mov ah,3eh
-        int 21h uses(ax,bx)    ; close: BX the handle
+        int 21h uses(ax,bx) writes(ax) ; close: BX the handle
 @dumpfb_x:
         ; also dump VRAM and the VDP registers, so a blank screen can be
         ; diagnosed offline: is the guest not drawing, or are we not reading?
         mov dx,fvram
         mov cx,0
         mov ah,3ch
-        int 21h uses(ax,cx,dx) ; create: CX attributes, DS:DX name
+        int 21h uses(ax,cx,dx) writes(ax) ; create: CX attributes, DS:DX name
         jc @dumpfb_y
         mov bx,ax
         push ds
@@ -678,45 +696,45 @@ dumpfb:
         xor dx,dx
         mov cx,4000h
         mov ah,40h
-        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        int 21h uses(ax,bx,cx,dx) writes(ax) ; write: BX handle, CX count, DS:DX buffer
         pop ds
         mov ah,3eh
-        int 21h uses(ax,bx)    ; close: BX the handle
+        int 21h uses(ax,bx) writes(ax) ; close: BX the handle
 @dumpfb_y:
         mov dx,freg
         mov cx,0
         mov ah,3ch
-        int 21h uses(ax,cx,dx) ; create: CX attributes, DS:DX name
+        int 21h uses(ax,cx,dx) writes(ax) ; create: CX attributes, DS:DX name
         jc @dumpfb_z
         mov bx,ax
         mov dx,vregs
         mov cx,8
         mov ah,40h
-        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        int 21h uses(ax,bx,cx,dx) writes(ax) ; write: BX handle, CX count, DS:DX buffer
         mov dx,zPC
         mov cx,2
         mov ah,40h
-        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        int 21h uses(ax,bx,cx,dx) writes(ax) ; write: BX handle, CX count, DS:DX buffer
         mov dx,psgregs         ; the latched PSG state, to check the sound path
         mov cx,16
         mov ah,40h
-        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        int 21h uses(ax,bx,cx,dx) writes(ax) ; write: BX handle, CX count, DS:DX buffer
         mov dx,zF              ; and the guest register file, both banks
         mov cx,16
         mov ah,40h
-        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        int 21h uses(ax,bx,cx,dx) writes(ax) ; write: BX handle, CX count, DS:DX buffer
         mov dx,phase           ; the synthesis state: phase, inc, amp, noise
         mov cx,24
         mov ah,40h
-        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        int 21h uses(ax,bx,cx,dx) writes(ax) ; write: BX handle, CX count, DS:DX buffer
         mov dx,sccreg          ; the captured SCC window and its armed flag --
         mov cx,0a1h            ; this must precede the SB.BIN block, which
         mov ah,40h             ; reuses and closes the handle in BX
-        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        int 21h uses(ax,bx,cx,dx) writes(ax) ; write: BX handle, CX count, DS:DX buffer
         mov dx,fsb             ; and the rendered wave, to check it offline
         mov cx,0
         mov ah,3ch
-        int 21h uses(ax,cx,dx) ; create: CX attributes, DS:DX name
+        int 21h uses(ax,cx,dx) writes(ax) ; create: CX attributes, DS:DX name
         jc @dumpfb_s
         mov bx,ax
         push ds
@@ -724,17 +742,17 @@ dumpfb:
         xor dx,dx
         mov cx,SBLEN*2         ; samples, two bytes each
         mov ah,40h
-        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        int 21h uses(ax,bx,cx,dx) writes(ax) ; write: BX handle, CX count, DS:DX buffer
         pop ds
         mov ah,3eh
-        int 21h uses(ax,bx)    ; close: BX the handle
+        int 21h uses(ax,bx) writes(ax) ; close: BX the handle
 @dumpfb_s:
         mov dx,portcnt
         mov cx,512
         mov ah,40h
-        int 21h uses(ax,bx,cx,dx) ; write: BX handle, CX count, DS:DX buffer
+        int 21h uses(ax,bx,cx,dx) writes(ax) ; write: BX handle, CX count, DS:DX buffer
         mov ah,3eh
-        int 21h uses(ax,bx)    ; close: BX the handle
+        int 21h uses(ax,bx) writes(ax) ; close: BX the handle
 @dumpfb_z:
         ret
 fshot:
